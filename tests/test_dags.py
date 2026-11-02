@@ -17,3 +17,10 @@ def test_hello_dag_structure():
     dag = dag_bag.get_dag("hello_dag")
     assert dag is not None
     assert {t.task_id for t in dag.tasks} == {"make_number", "print_number"}
+
+
+def test_weather_pipeline_structure():
+    dag_bag = DagBag(dag_folder="/opt/airflow/dags")
+    dag = dag_bag.get_dag("weather_pipeline")
+    assert dag is not None
+    assert {t.task_id for t in dag.tasks} == {"create_tables", "fetch"}
