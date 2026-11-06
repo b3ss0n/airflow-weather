@@ -5,6 +5,7 @@
 """
 
 import sys
+from datetime import datetime, timezone
 
 from airflow.models import DagBag
 
@@ -74,8 +75,17 @@ def test_check_hourly_temperature_out_of_range():
         assert check_hourly(hourly) != []
 
 
+def test_hourly_to_rows():
+    from weather_pipeline import hourly_to_rows
+
+    rows = hourly_to_rows("Kazan", _good_hourly())
+    assert len(rows) == 24
+    # Порядок: city, ts (UTC), temperature, precipitation, wind_speed
+    assert rows[1] == ("Kazan", datetime(2026, 11, 1, 1, 0, tzinfo=timezone.utc), 5.0, 0.0, 3.0)
+
+
 def test_weather_pipeline_structure():
     dag_bag = DagBag(dag_folder="/opt/airflow/dags")
     dag = dag_bag.get_dag("weather_pipeline")
     assert dag is not None
-    assert {t.task_id for t in dag.tasks} == {"create_tables", "fetch", "validate"}
+    assert {t.task_id for t in dag.tasks} == {"create_tables", "fetch", "validate", "transform_load"}

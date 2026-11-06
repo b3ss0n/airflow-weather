@@ -3,7 +3,7 @@
 
 import json
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pendulum
 import requests
@@ -53,6 +53,31 @@ def check_hourly(hourly: dict) -> list[str]:
     return problems
 
 
+def hourly_to_rows(city: str, hourly: dict) -> list[tuple]:
+    """Превращает массивы Open-Meteo в строки (city, ts, temperature, precipitation, wind_speed)."""
+    return [
+        # Время приходит в UTC без пояса, поэтому пояс проставляем явно
+        (city, datetime.fromisoformat(ts).replace(tzinfo=timezone.utc), temp, prec, wind)
+        for ts, temp, prec, wind in zip(
+            hourly["time"],
+            hourly["temperature_2m"],
+            hourly["precipitation"],
+            hourly["wind_speed_10m"],
+        )
+    ]
+
+
+def get_hourly(city: str, day: str) -> dict:
+    """Достаёт из raw_weather почасовые данные города за дату."""
+    row = PostgresHook(postgres_conn_id="weather_db").get_first(
+        "SELECT payload FROM raw_weather WHERE city = %s AND date = %s",
+        parameters=(city, day),
+    )
+    if row is None:
+        raise ValueError(f"{city} {day}: в raw_weather нет строки")
+    return row[0]["hourly"]
+
+
 @dag(
     dag_id="weather_pipeline",
     # Run за сутки X стартует в 00:00 UTC следующих суток и обрабатывает данные за X
@@ -73,6 +98,14 @@ def weather_pipeline():
                 date    date  NOT NULL,
                 payload jsonb NOT NULL,
                 PRIMARY KEY (city, date)
+            );
+            CREATE TABLE IF NOT EXISTS hourly_weather (
+                city          text             NOT NULL,
+                ts            timestamptz      NOT NULL,
+                temperature   double precision,
+                precipitation double precision,
+                wind_speed    double precision,
+                PRIMARY KEY (city, ts)
             )
             """
         )
@@ -111,23 +144,32 @@ def weather_pipeline():
     def validate(city: str, data_interval_start=None) -> str:
         # Данные берём из базы по городу и дате (через XCom пришло только имя города)
         day = data_interval_start.strftime("%Y-%m-%d")
-        row = PostgresHook(postgres_conn_id="weather_db").get_first(
-            "SELECT payload FROM raw_weather WHERE city = %s AND date = %s",
-            parameters=(city, day),
-        )
-        if row is None:
-            raise ValueError(f"{city} {day}: в raw_weather нет строки")
-
-        problems = check_hourly(row[0]["hourly"])
+        problems = check_hourly(get_hourly(city, day))
         if problems:
             # Исключение = задача падает. Retries не нужны: повтор не исправит плохие данные
             raise ValueError(f"{city} {day}: " + "; ".join(problems))
         return city
 
-    # Сначала таблица, потом fetch по каждому городу, затем validate по каждому городу
+    @task
+    def transform_load(city: str, data_interval_start=None) -> str:
+        day = data_interval_start.strftime("%Y-%m-%d")
+        rows = hourly_to_rows(city, get_hourly(city, day))
+        # replace=True + replace_index даёт INSERT ... ON CONFLICT (city, ts) DO UPDATE:
+        # повторный запуск перезапишет строки, а не создаст дубли
+        PostgresHook(postgres_conn_id="weather_db").insert_rows(
+            table="hourly_weather",
+            rows=rows,
+            target_fields=["city", "ts", "temperature", "precipitation", "wind_speed"],
+            replace=True,
+            replace_index=["city", "ts"],
+        )
+        return city
+
+    # Сначала таблицы, потом по каждому городу: fetch -> validate -> transform_load
     fetched = fetch.expand(city=CITIES)
     create_tables() >> fetched
-    validate.expand(city=fetched)
+    validated = validate.expand(city=fetched)
+    transform_load.expand(city=validated)
 
 
 weather_pipeline()
