@@ -29,11 +29,17 @@ HOURS_PER_DAY = 24
 MIN_TEMP, MAX_TEMP = -60, 50
 
 
-def check_hourly(hourly: dict) -> list[str]:
+def check_hourly(hourly: dict, day: str) -> list[str]:
     """Возвращает список проблем в почасовых данных за сутки (пустой список = данные в порядке)."""
     problems = []
-    if len(hourly.get("time", [])) != HOURS_PER_DAY:
-        problems.append(f"часов {len(hourly.get('time', []))} вместо {HOURS_PER_DAY}")
+    timestamps = hourly.get("time", [])
+    expected_hours = {f"{day}T{hour:02d}:00" for hour in range(HOURS_PER_DAY)}
+    if not isinstance(timestamps, list) or any(not isinstance(ts, str) for ts in timestamps):
+        problems.append("time: ожидался список строк с часами UTC")
+    elif len(timestamps) != HOURS_PER_DAY:
+        problems.append(f"часов {len(timestamps)} вместо {HOURS_PER_DAY}")
+    elif set(timestamps) != expected_hours:
+        problems.append(f"time: ожидалось по одной метке каждого часа за {day} UTC")
 
     for name in HOURLY.split(","):
         values = hourly.get(name, [])
@@ -155,7 +161,7 @@ def weather_pipeline():
     def validate(city: str, data_interval_start=None) -> str:
         # Данные берём из базы по городу и дате (через XCom пришло только имя города)
         day = data_interval_start.strftime("%Y-%m-%d")
-        problems = check_hourly(get_hourly(city, day))
+        problems = check_hourly(get_hourly(city, day), day)
         if problems:
             # Исключение = задача падает. Retries не нужны: повтор не исправит плохие данные
             raise ValueError(f"{city} {day}: " + "; ".join(problems))

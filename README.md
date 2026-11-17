@@ -1,33 +1,44 @@
-# airflow-weather
+# Airflow Weather
 
-Учебный пайплайн на Apache Airflow 3: ежедневная загрузка погоды из Open-Meteo в Postgres.
+Собрал пайплайн, который каждый день загружает погоду из Open-Meteo для Казани, Иннополиса, Москвы и Санкт-Петербурга. На этих данных сравнил несколько способов предсказать среднюю температуру на следующие сутки.
 
-## Запуск
+## Как идут данные
+
+```text
+create_tables → fetch × 4 → validate × 4 → transform_load × 4 → build_daily_stats
+```
+
+Airflow запускает загрузку по каждому городу. Исходный ответ API идёт в `raw_weather`. После проверки всех 24 часов UTC данные записываются в `hourly_weather`. Из них SQL-запрос считает `daily_stats`. Повторный запуск за ту же дату обновляет существующие записи.
+
+Через backfill загрузил год истории. В базе **35 040 почасовых записей** и **1 460 дневных сводок**. [Отчёт о загрузке](backfill-report.md)
+
+![Успешный запуск weather_pipeline в Airflow](docs/airflow-run.png)
+
+## Прогноз
+
+Сравнил Ridge с простым прогнозом «завтра как сегодня». Использовал дневные сводки, температуру вечером и её изменение за 6 и 12 часов. Добавление четверти предсказанного изменения к бейзлайну снизило среднюю MAE на семи временных окнах с 1,615 до 1,558 °C. [Отчёт по моделям](ml/report.md)
+
+## Как запустить
+
+Нужен Docker Compose. При первом запуске скопируй шаблон из корня проекта.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+На Linux и macOS можно использовать `cp .env.example .env`. В `.env` задай свои пароли и JWT-секрет. На Linux также укажи свой `AIRFLOW_UID`.
 
 ```bash
-cp .env.example .env        # затем поменяй пароли и секрет внутри
-mkdir -p logs               # на Linux ещё: echo "AIRFLOW_UID=$(id -u)" >> .env
 docker compose up -d
 ```
 
-Первый запуск занимает несколько минут (скачиваются образы). UI: http://localhost:8080
+Открой Airflow и сними `weather_pipeline` с паузы. [Веб-интерфейс Airflow](http://127.0.0.1:8080)
 
-## Полезные команды
+Команды для тестов и остановки проекта.
 
 ```bash
-docker compose ps                                      # статус сервисов
-docker compose logs -f airflow-scheduler               # логи планировщика
-docker compose exec airflow-scheduler airflow dags list
 docker compose exec airflow-scheduler python -m pytest /opt/airflow/tests
-docker compose down                                    # остановить (данные сохранятся)
-docker compose down -v                                 # остановить и удалить базу
+docker compose stop
 ```
 
-## Структура
-
-```
-dags/       DAG'и (подхватываются автоматически)
-tests/      тесты DAG'ов
-postgres/   скрипт создания базы weather
-sql/        SQL для таблиц проекта
-```
+Скрипты обучения лежат в `ml/`. Команды и SQL для выгрузки данных есть в [отчёте по моделям](ml/report.md).
