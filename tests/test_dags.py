@@ -88,4 +88,12 @@ def test_weather_pipeline_structure():
     dag_bag = DagBag(dag_folder="/opt/airflow/dags")
     dag = dag_bag.get_dag("weather_pipeline")
     assert dag is not None
-    assert {t.task_id for t in dag.tasks} == {"create_tables", "fetch", "validate", "transform_load"}
+    assert {t.task_id for t in dag.tasks} == {
+        "create_tables",
+        "fetch",
+        "validate",
+        "transform_load",
+        "build_daily_stats",
+    }
+    # Сводка строится только после загрузки всех городов
+    assert dag.get_task("build_daily_stats").upstream_task_ids == {"transform_load"}

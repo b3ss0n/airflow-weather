@@ -1,5 +1,6 @@
 """Погодный пайплайн. Шаг 3: загрузка сырого JSON из Open-Meteo в raw_weather.
-Шаг 4: проверка качества данных (validate)."""
+Шаг 4: проверка качества данных (validate).
+Шаг 6: дневная сводка по городам (build_daily_stats)."""
 
 import json
 import math
@@ -106,6 +107,16 @@ def weather_pipeline():
                 precipitation double precision,
                 wind_speed    double precision,
                 PRIMARY KEY (city, ts)
+            );
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                city             text             NOT NULL,
+                date             date             NOT NULL,
+                temp_min         double precision,
+                temp_max         double precision,
+                temp_avg         double precision,
+                precipitation_sum double precision,
+                wind_speed_avg   double precision,
+                PRIMARY KEY (city, date)
             )
             """
         )
@@ -165,11 +176,46 @@ def weather_pipeline():
         )
         return city
 
-    # Сначала таблицы, потом по каждому городу: fetch -> validate -> transform_load
+    @task
+    def build_daily_stats(data_interval_start=None, data_interval_end=None) -> int:
+        # Одна задача на все города: считаем сводку прямо в Postgres, данные в Python не тянем.
+        # Берём сутки run'а: ts в [начало, конец). Upsert по (city, date) — без дублей при перезапуске.
+        hook = PostgresHook(postgres_conn_id="weather_db")
+        hook.run(
+            """
+            INSERT INTO daily_stats
+                (city, date, temp_min, temp_max, temp_avg, precipitation_sum, wind_speed_avg)
+            SELECT city, %(day)s::date,
+                   MIN(temperature), MAX(temperature), AVG(temperature),
+                   SUM(precipitation), AVG(wind_speed)
+            FROM hourly_weather
+            WHERE ts >= %(start)s AND ts < %(end)s
+            GROUP BY city
+            ON CONFLICT (city, date) DO UPDATE SET
+                temp_min          = EXCLUDED.temp_min,
+                temp_max          = EXCLUDED.temp_max,
+                temp_avg          = EXCLUDED.temp_avg,
+                precipitation_sum = EXCLUDED.precipitation_sum,
+                wind_speed_avg    = EXCLUDED.wind_speed_avg
+            """,
+            parameters={
+                "day": data_interval_start.strftime("%Y-%m-%d"),
+                "start": data_interval_start,
+                "end": data_interval_end,
+            },
+        )
+        # В XCom — только счётчик: сколько городов попало в сводку
+        return hook.get_first(
+            "SELECT COUNT(*) FROM daily_stats WHERE date = %s",
+            parameters=(data_interval_start.strftime("%Y-%m-%d"),),
+        )[0]
+
+    # Сначала таблицы, потом по каждому городу: fetch -> validate -> transform_load,
+    # затем одна сводка после всех городов
     fetched = fetch.expand(city=CITIES)
     create_tables() >> fetched
     validated = validate.expand(city=fetched)
-    transform_load.expand(city=validated)
+    transform_load.expand(city=validated) >> build_daily_stats()
 
 
 weather_pipeline()
